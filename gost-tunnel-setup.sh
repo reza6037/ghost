@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 #
-# GOST Tunnel Manager - Multi-Instance (Visual Edition) - FIXED
+# GOST Tunnel Manager - Multi-Instance (Visual Edition) - BACK BUTTON FIXED
 #
-set -uo pipefail
 
 BIN_PATH="/usr/local/bin/gost"
 RESOLV_CONF="/etc/resolv.conf"
@@ -25,7 +24,7 @@ print_banner() {
     clear
     echo -e "${MAGENTA}"
     echo " ╔════════════════════════════════════════════════════╗"
-    echo " ║             GOST TUNNEL MANAGER v2.1               ║"
+    echo " ║             GOST TUNNEL MANAGER v2.2               ║"
     echo " ║          Multi-Instance Support (Iran Server)      ║"
     echo " ╚════════════════════════════════════════════════════╝"
     echo -e "${NC}"
@@ -208,7 +207,7 @@ select_tunnel_menu() {
         if [[ ${#configs[@]} -eq 0 ]]; then
             log_warn "Hich tanli peida nashod. Aval gozine 1 ro bezanid."
             sleep 2
-            return 0
+            break
         fi
 
         print_header "List-e Tanl-haye Mojood"
@@ -216,7 +215,7 @@ select_tunnel_menu() {
         declare -A tunnel_map
         for cfg in "${configs[@]}"; do
             source "$cfg"
-            echo -e "  ${WHITE}$i)${NC} ${CYAN}[${TUNNEL_NAME}]${NC} ➔ IP: ${YELLOW}${FOREIGN_IP}${NC} | Ports: ${GREEN}${PORTS}${NC}"
+            echo -e "  ${WHITE}$i)${NC} ${CYAN}[${TUNNEL_NAME}]${NC} ➔ IP: ${YELLOW}${FOREIGN_IP}  ${NC} | Ports: ${GREEN}${PORTS}${NC}"
             tunnel_map[$i]="${TUNNEL_NAME}"
             ((i++))
         done
@@ -227,7 +226,7 @@ select_tunnel_menu() {
         ask "Shomare tanl ro entekhab konid: "
         read -r CHOICE
         
-        if [[ "$CHOICE" == "0" || -z "$CHOICE" ]]; then return 0; fi
+        if [[ "$CHOICE" == "0" || -z "$CHOICE" ]]; then break; fi
 
         if [[ -n "${tunnel_map[$CHOICE]:-}" ]]; then
             set_tunnel_variables "${tunnel_map[$CHOICE]}"
@@ -244,7 +243,7 @@ manage_single_tunnel() {
     while true; do
         print_banner
         print_header "Modiriat Tanl: ${MAGENTA}[ ${TUNNEL_NAME} ]${NC}"
-        echo -e "  IP Kharej: ${YELLOW}${FOREIGN_IP}${NC}  |  Port(ha): ${GREEN}${PORTS}${NC}"
+        echo -e "  IP Kharej: ${YELLOW}${FOREIGN_IP}  ${NC} |  Port(ha): ${GREEN}${PORTS}${NC}"
         echo " ────────────────────────────────────────"
         echo -e "  ${WHITE}1)${NC} Taghir-e IP-e khareji"
         echo -e "  ${WHITE}2)${NC} Taghir-e Port-ha"
@@ -311,10 +310,10 @@ manage_single_tunnel() {
                     rm -f "$SERVICE_FILE" "$CONFIG_FILE" "$CRON_FILE"
                     systemctl daemon-reload
                     log_ok "Tanl '${TUNNEL_NAME}' pak shod."; sleep 2
-                    return 0
+                    break
                 fi
                 ;;
-            0) return 0 ;;
+            0) break ;;
             *) log_err "Nadorost."; sleep 1 ;;
         esac
     done
