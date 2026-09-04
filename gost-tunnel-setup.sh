@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 #
-# GOST Tunnel Manager - Multi-Instance (Visual Edition)
+# GOST Tunnel Manager - Multi-Instance (Visual Edition) - FIXED
 #
-set -euo pipefail
+set -uo pipefail
 
 BIN_PATH="/usr/local/bin/gost"
 RESOLV_CONF="/etc/resolv.conf"
@@ -25,7 +25,7 @@ print_banner() {
     clear
     echo -e "${MAGENTA}"
     echo " ╔════════════════════════════════════════════════════╗"
-    echo " ║             GOST TUNNEL MANAGER v2.0               ║"
+    echo " ║             GOST TUNNEL MANAGER v2.1               ║"
     echo " ║          Multi-Instance Support (Iran Server)      ║"
     echo " ╚════════════════════════════════════════════════════╝"
     echo -e "${NC}"
@@ -133,7 +133,7 @@ EOF
 }
 
 load_config() {
-    if [[ ! -f "$CONFIG_FILE" ]]; then return 1; fi
+    if [[ ! -f "$CONFIG_FILE" ]]; then return 0; fi
     source "$CONFIG_FILE"
 }
 
@@ -156,17 +156,17 @@ do_configure() {
 
     ask "Name ya Shenase tanl (mesal: panel1): "
     read -r TNAME
-    if [[ -z "$TNAME" ]]; then log_err "Name khali ast!"; sleep 2; return 1; fi
+    if [[ -z "$TNAME" ]]; then log_err "Name khali ast!"; sleep 2; return 0; fi
     TNAME=$(echo "$TNAME" | tr '[:upper:]' '[:lower:]' | tr -cd '[:alnum:]-_')
     set_tunnel_variables "$TNAME"
 
     ask "IP Server Kharej: "
     read -r FOREIGN_IP
-    if [[ -z "$FOREIGN_IP" ]]; then log_err "IP khali ast!"; sleep 2; return 1; fi
+    if [[ -z "$FOREIGN_IP" ]]; then log_err "IP khali ast!"; sleep 2; return 0; fi
 
     ask "Port(haye) Kharej (joda ba comma): "
     read -r PORTS_INPUT
-    if [[ -z "$PORTS_INPUT" ]]; then log_err "Port khali ast!"; sleep 2; return 1; fi
+    if [[ -z "$PORTS_INPUT" ]]; then log_err "Port khali ast!"; sleep 2; return 0; fi
 
     rebuild_gost_args "$FOREIGN_IP" "$PORTS_INPUT"
     PORTS="$PORTS_INPUT"
@@ -208,7 +208,7 @@ select_tunnel_menu() {
         if [[ ${#configs[@]} -eq 0 ]]; then
             log_warn "Hich tanli peida nashod. Aval gozine 1 ro bezanid."
             sleep 2
-            return 1
+            return 0
         fi
 
         print_header "List-e Tanl-haye Mojood"
@@ -223,10 +223,11 @@ select_tunnel_menu() {
         echo -e "  ${WHITE}0)${NC} Bazgasht"
         print_footer
 
+        local CHOICE
         ask "Shomare tanl ro entekhab konid: "
         read -r CHOICE
         
-        if [[ "$CHOICE" == "0" || -z "$CHOICE" ]]; then return 1; fi
+        if [[ "$CHOICE" == "0" || -z "$CHOICE" ]]; then return 0; fi
 
         if [[ -n "${tunnel_map[$CHOICE]:-}" ]]; then
             set_tunnel_variables "${tunnel_map[$CHOICE]}"
@@ -255,6 +256,7 @@ manage_single_tunnel() {
         echo -e "  ${WHITE}0)${NC} Bazgasht"
         print_footer
 
+        local SUBCHOICE
         ask "Entekhab konid: "
         read -r SUBCHOICE
 
@@ -327,6 +329,7 @@ show_menu() {
         echo -e "  ${WHITE}0)${NC} Khorooj"
         print_footer
         
+        local CHOICE
         ask "Entekhab konid [0-2]: "
         read -r CHOICE
 
