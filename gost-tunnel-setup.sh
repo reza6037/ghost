@@ -2,6 +2,7 @@
 #
 # GOST Tunnel Manager - baraye server Iran
 # Kar: yek TCP tunnel sadeh be samte server khareji (Pasargad panel) mizanad
+# (Nyazi be nasb-e jodagane ru server-e khareji nist - faghat portesh bayad baz bashe)
 #
 set -euo pipefail
 
@@ -10,6 +11,7 @@ SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
 BIN_PATH="/usr/local/bin/gost"
 CONFIG_FILE="/etc/gost-tunnel.conf"
 CRON_FILE="/etc/cron.d/gost-tunnel-restart"
+RESOLV_CONF="/etc/resolv.conf"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -106,6 +108,143 @@ install_gost() {
     log_ok "GOST ba movafaghiat nasb shod: $($BIN_PATH -V 2>&1 || true)"
 }
 
+# ---------------------------------------------
+# DNS-e dakheli: test-e latency + local caching (dnsmasq)
+#
+# Tavajoh: DNS faghat sor'at-e resolve-e domain-ha ro kam mikone
+# (masalan load-e site/launcher), ru ping-e vaghei-e dakhele-e bazi
+# (ke ba'ad az resolve mostaghiman ru IP mire) tasiri nadare.
+# In DNS caching baraye sor'at-e kolli va connection setup mofide.
+# ---------------------------------------------
+measure_dns_latency() {
+    local ip="$1"
+    local qtime
+    qtime=$(dig +time=1 +tries=1 @"$ip" google.com 2>/dev/null | awk '/Query time:/ {print $4}')
+    if [[ -z "$qtime" ]]; then
+        echo 9999
+    else
+        echo "$qtime"
+    fi
+}
+
+setup_internal_dns() {
+    log_info "Dar hale test-e latency-e chandta DNS provider baraye entekhab-e sari-tarin..."
+
+    if ! command -v dig >/dev/null 2>&1; then
+        apt-get update -y >/dev/null 2>&1 && apt-get install -y dnsutils >/dev/null 2>&1 || \
+        yum install -y bind-utils >/dev/null 2>&1 || true
+    fi
+
+    local names=("Google-1" "Google-2" "Cloudflare-1" "Cloudflare-2" "Quad9")
+    local ips=("8.8.8.8" "8.8.4.4" "1.1.1.1" "1.0.0.1" "9.9.9.9")
+
+    BEST_NAME=""
+    BEST_IP=""
+    BEST_TIME=999999
+    SECOND_IP="8.8.8.8"
+    SECOND_TIME=999999
+
+    for i in "${!ips[@]}"; do
+        local ip="${ips[$i]}"
+        local name="${names[$i]}"
+        local t
+        t=$(measure_dns_latency "$ip")
+        echo "  ${name} (${ip}): ${t} ms"
+        if [[ "$t" -lt "$BEST_TIME" ]]; then
+            SECOND_IP="$BEST_IP"
+            SECOND_TIME="$BEST_TIME"
+            BEST_TIME="$t"
+            BEST_NAME="$name"
+            BEST_IP="$ip"
+        elif [[ "$t" -lt "$SECOND_TIME" ]]; then
+            SECOND_TIME="$t"
+            SECOND_IP="$ip"
+        fi
+    done
+
+    if [[ -z "$BEST_IP" || "$BEST_TIME" -eq 9999 ]]; then
+        log_warn "Hich DNS-i javab-e motabar nadad, fallback be Google DNS."
+        BEST_IP="8.8.8.8"
+        SECOND_IP="8.8.4.4"
+    else
+        log_ok "Sari-tarin DNS: ${BEST_NAME} (${BEST_IP}) ~ ${BEST_TIME}ms | fallback: ${SECOND_IP}"
+    fi
+
+    # nasb-e dnsmasq baraye local caching (query-haye tekrari taghriban 0ms mishan)
+    if ! command -v dnsmasq >/dev/null 2>&1; then
+        log_info "Dar hale nasb-e dnsmasq baraye DNS caching-e mahalli..."
+        apt-get update -y >/dev/null 2>&1 && apt-get install -y dnsmasq >/dev/null 2>&1 || \
+        yum install -y dnsmasq >/dev/null 2>&1 || true
+    fi
+
+    if command -v dnsmasq >/dev/null 2>&1; then
+        systemctl stop systemd-resolved >/dev/null 2>&1 || true
+        systemctl disable systemd-resolved >/dev/null 2>&1 || true
+
+        cat > /etc/dnsmasq.conf <<EOF
+no-resolv
+server=${BEST_IP}
+server=${SECOND_IP}
+cache-size=2000
+listen-address=127.0.0.1
+bind-interfaces
+EOF
+        systemctl enable dnsmasq >/dev/null 2>&1 || true
+        systemctl restart dnsmasq
+
+        rm -f "$RESOLV_CONF"
+        cat > "$RESOLV_CONF" <<EOF
+nameserver 127.0.0.1
+EOF
+        log_ok "dnsmasq (local cache) fa'al shod, forward be ${BEST_IP} / ${SECOND_IP}"
+    else
+        log_warn "Nashod dnsmasq nasb beshe. Faghat DNS-e sari be sorat-e mostaghim tanzim shod (bedun-e cache)."
+        [[ -L "$RESOLV_CONF" ]] && rm -f "$RESOLV_CONF" || cp "$RESOLV_CONF" "${RESOLV_CONF}.bak.$(date +%s)" 2>/dev/null || true
+        cat > "$RESOLV_CONF" <<EOF
+nameserver ${BEST_IP}
+nameserver ${SECOND_IP}
+EOF
+    fi
+
+    log_info "Yad-avari: in tanzimat sor'at-e resolve-e domain-ha ro behtar mikone; ping-e dakhele-e bazi be masir-e tunnel bastegi dare."
+}
+
+rebuild_gost_args() {
+    local ip="$1"
+    local ports_csv="$2"
+
+    IFS=',' read -ra PORT_ARRAY <<< "$ports_csv"
+
+    GOST_ARGS=""
+    for p in "${PORT_ARRAY[@]}"; do
+        p_trimmed=$(echo "$p" | xargs)
+        if ! [[ "$p_trimmed" =~ ^[0-9]+$ ]]; then
+            log_err "Port '$p_trimmed' adad nist."
+            exit 1
+        fi
+        GOST_ARGS="${GOST_ARGS} -L=tcp://:${p_trimmed}/${ip}:${p_trimmed}"
+    done
+
+    FOREIGN_IP="$ip"
+    PORTS="$ports_csv"
+}
+
+save_config() {
+    {
+        echo "FOREIGN_IP=${FOREIGN_IP}"
+        echo "PORTS=${PORTS}"
+    } > "$CONFIG_FILE"
+}
+
+load_config() {
+    if [[ ! -f "$CONFIG_FILE" ]]; then
+        log_err "Hanooz tunnel pikarbandi nashode. Aval gozine 1 (Pikarbandi) ro bezan."
+        return 1
+    fi
+    # shellcheck disable=SC1090
+    source "$CONFIG_FILE"
+}
+
 ask_tunnel_config() {
     echo ""
     log_info "Hala tanzimat-e tunnel ro vared kon:"
@@ -127,19 +266,7 @@ ask_tunnel_config() {
         exit 1
     fi
 
-    # tabdil comma be array
-    IFS=',' read -ra PORT_ARRAY <<< "$PORTS_INPUT"
-
-    # sakhtan-e argument haye -L baraye har port (ham local ham remote port yeki mishe)
-    GOST_ARGS=""
-    for p in "${PORT_ARRAY[@]}"; do
-        p_trimmed=$(echo "$p" | xargs)
-        if ! [[ "$p_trimmed" =~ ^[0-9]+$ ]]; then
-            log_err "Port '$p_trimmed' adad nist."
-            exit 1
-        fi
-        GOST_ARGS="${GOST_ARGS} -L=tcp://:${p_trimmed}/${FOREIGN_IP}:${p_trimmed}"
-    done
+    rebuild_gost_args "$FOREIGN_IP" "$PORTS_INPUT"
 
     echo ""
     log_info "Khalase tanzimat:"
@@ -147,11 +274,7 @@ ask_tunnel_config() {
     echo "  Port-ha        : $PORTS_INPUT"
     echo ""
 
-    # zakhire baraye estefade badi (uninstall/status/reconfigure)
-    {
-        echo "FOREIGN_IP=${FOREIGN_IP}"
-        echo "PORTS=${PORTS_INPUT}"
-    } > "$CONFIG_FILE"
+    save_config
 }
 
 create_systemd_service() {
@@ -186,9 +309,10 @@ EOF
     fi
 }
 
-setup_cron_restart() {
-    log_info "Dar hale tanzim-e cronjob baraye restart-e automatic (har 4 saat yekbar)..."
-
+# ---------------------------------------------
+# Cron Job Restart - hala hour-e delkhah az karbar porsideh mishe
+# ---------------------------------------------
+ensure_cron_installed() {
     if ! command -v cron >/dev/null 2>&1 && ! command -v crond >/dev/null 2>&1; then
         log_warn "Sarvis-e cron peida nashod. Dar hale nasb-e cron..."
         if command -v apt-get >/dev/null 2>&1; then
@@ -203,14 +327,33 @@ setup_cron_restart() {
             log_warn "Nashod cron ro automatic nasb konam. Khodet cron ro nasb kon."
         fi
     fi
+}
+
+setup_cron_restart() {
+    check_root
+    if [[ ! -f "$BIN_PATH" ]]; then
+        log_err "Aval GOST ro pikarbandi kon (gozine 1)."
+        return 1
+    fi
+
+    echo ""
+    read -rp "Har chand saat yekbar service restart beshe? (masalan 4): " CRON_HOURS
+
+    if ! [[ "$CRON_HOURS" =~ ^[0-9]+$ ]] || [[ "$CRON_HOURS" -lt 1 ]] || [[ "$CRON_HOURS" -gt 23 ]]; then
+        log_err "Adad-e vared shode motabar nist. Bayad adad-e beine 1 ta 23 bashe."
+        return 1
+    fi
+
+    log_info "Dar hale tanzim-e cronjob baraye restart-e automatic (har ${CRON_HOURS} saat yekbar)..."
+    ensure_cron_installed
 
     cat > "$CRON_FILE" <<EOF
-# Automatic restart-e gost-tunnel har 4 saat yekbar
-0 */4 * * * root systemctl restart ${SERVICE_NAME}.service >/dev/null 2>&1
+# Automatic restart-e gost-tunnel har ${CRON_HOURS} saat yekbar
+0 */${CRON_HOURS} * * * root systemctl restart ${SERVICE_NAME}.service >/dev/null 2>&1
 EOF
     chmod 644 "$CRON_FILE"
 
-    log_ok "Cronjob tanzim shod: har 4 saat yekbar service restart mishe (fayl: $CRON_FILE)"
+    log_ok "Cronjob tanzim shod: har ${CRON_HOURS} saat yekbar service restart mishe (fayl: $CRON_FILE)"
 }
 
 remove_cron_restart() {
@@ -220,22 +363,42 @@ remove_cron_restart() {
     fi
 }
 
-do_install() {
+toggle_cron() {
     check_root
-    install_gost
+    if [[ -f "$CRON_FILE" ]]; then
+        remove_cron_restart
+        log_info "Automatic restart (cron) gheyr-e fa'al shod."
+    else
+        setup_cron_restart
+    fi
+}
+
+# ---------------------------------------------
+# Pikarbandi-e Tunnel (Nasb agar lazem bashe + Configure + DNS)
+# ---------------------------------------------
+do_configure() {
+    check_root
+
+    if [[ ! -f "$BIN_PATH" ]]; then
+        install_gost
+    else
+        log_info "GOST ghablan nasb shode. Az dade kardan-e mojadad sarfenazar mishe."
+    fi
+
     ask_tunnel_config
+    setup_internal_dns
     create_systemd_service
-    setup_cron_restart
     show_status
+
     echo ""
-    log_ok "Tamam shod! Alan caraberha mitunan az tarigh-e port-haye vared shode be internet-e beinolmelali vasl beshan."
-    log_info "Service har 4 saat yekbar be soorat-e automatic restart mishe (cronjob)."
+    log_ok "Pikarbandi tamam shod! Caraberha mitunan az tarigh-e port-haye vared shode vasl beshan."
+    log_info "Yadet nare az gozine 3 baraye tanzim-e automatic restart (cron) estefade koni."
 }
 
 show_logs() {
     check_root
     if ! systemctl list-unit-files | grep -q "$SERVICE_NAME"; then
-        log_err "Service hanooz nasb nashode. Aval install ro bezan."
+        log_err "Service hanooz nasb nashode. Aval gozine 1 (Pikarbandi) ro bezan."
         exit 1
     fi
     log_info "Live log (baraye khoruj: Ctrl+C)..."
@@ -275,25 +438,93 @@ do_uninstall() {
     log_ok "Hame chi pak shod."
 }
 
-toggle_cron() {
+# ---------------------------------------------
+# Modiriat-e Service: taghir-e IP / port / hazf-e service+cron
+# ---------------------------------------------
+change_ip() {
     check_root
-    if [[ -f "$CRON_FILE" ]]; then
-        remove_cron_restart
-        log_info "Automatic restart (cron) gheyr-e fa'al shod."
-    else
-        setup_cron_restart
+    load_config || return 1
+
+    echo ""
+    log_info "IP-e feli: ${FOREIGN_IP}"
+    read -rp "IP-e jadid-e server-e khareji: " NEW_IP
+    if [[ -z "$NEW_IP" ]]; then
+        log_err "IP nemitune khali bashe."
+        return 1
     fi
+
+    rebuild_gost_args "$NEW_IP" "$PORTS"
+    save_config
+    create_systemd_service
+    log_ok "IP be ${FOREIGN_IP} taghir kard va service update shod."
 }
 
-do_reconfigure() {
+change_ports() {
     check_root
-    if [[ ! -f "$BIN_PATH" ]]; then
-        log_err "Aval GOST ro nasb kon (gozine 1)."
-        exit 1
+    load_config || return 1
+
+    echo ""
+    log_info "Port-haye feli: ${PORTS}"
+    echo "Port-haye jadid ro ba comma vared kon. Masalan: 8080,8443,2053"
+    read -rp "Port(ha)-ye jadid: " NEW_PORTS
+    if [[ -z "$NEW_PORTS" ]]; then
+        log_err "Hich porti vared nashod."
+        return 1
     fi
-    ask_tunnel_config
+
+    rebuild_gost_args "$FOREIGN_IP" "$NEW_PORTS"
+    save_config
     create_systemd_service
-    log_ok "Port-ha update shodan."
+    log_ok "Port-ha be-roz shod: ${PORTS}"
+}
+
+delete_service_and_cron() {
+    check_root
+    log_warn "In kar service-e GOST va cronjob-e restart ro hazf mikone (khode barnameh-ye GOST hazf nemishe)."
+    read -rp "Motmaeni? (y/n): " CONFIRM
+    if [[ "$CONFIRM" != "y" && "$CONFIRM" != "Y" ]]; then
+        log_info "Cancel shod."
+        return 0
+    fi
+
+    systemctl stop "$SERVICE_NAME" 2>/dev/null || true
+    systemctl disable "$SERVICE_NAME" 2>/dev/null || true
+    rm -f "$SERVICE_FILE"
+    remove_cron_restart
+    systemctl daemon-reload
+
+    log_ok "Service va cronjob hazf shodan. (GOST hanooz nasbe, baraye pikarbandi-e mojadad gozine 1 ro bezan)"
+}
+
+service_management_menu() {
+    while true; do
+        echo ""
+        echo "======================================"
+        echo "        Modiriat-e Service"
+        echo "======================================"
+        echo "1) Taghir-e IP-e khareji"
+        echo "2) Taghir-e Port-ha"
+        echo "3) Restart-e dasti"
+        echo "4) Status-e service"
+        echo "5) Roshan/khamush-e automatic restart (cron)"
+        echo "6) Hazf-e Service + Cronjob (bedun-e hazf-e GOST)"
+        echo "7) Hazf-e kamel (Uninstall-e GOST + service + cron)"
+        echo "0) Bazgasht be manu-e asli"
+        echo "======================================"
+        read -rp "Entekhab kon [0-7]: " SUBCHOICE
+
+        case "$SUBCHOICE" in
+            1) change_ip ;;
+            2) change_ports ;;
+            3) do_restart ;;
+            4) show_status ;;
+            5) toggle_cron ;;
+            6) delete_service_and_cron ;;
+            7) do_uninstall ;;
+            0) return 0 ;;
+            *) log_err "Entekhab-e nadorost." ;;
+        esac
+    done
 }
 
 show_menu() {
@@ -301,25 +532,19 @@ show_menu() {
     echo "======================================"
     echo "   GOST Tunnel Manager - Server Iran"
     echo "======================================"
-    echo "1) Nasb va rah andazi-e tunnel (Install)"
-    echo "2) Didan-e log-ha (be soorat-e zende)"
-    echo "3) Didan-e status-e service"
-    echo "4) Restart kardan-e service"
-    echo "5) Taghir-e port-ha (Reconfigure)"
-    echo "6) Roshan/khamush kardan-e automatic restart (cron - har 4 saat)"
-    echo "7) Hazf-e kamel (Uninstall)"
+    echo "1) Pikarbandi-e Tunnel (Nasb + Configure + DNS)"
+    echo "2) Modiriat-e Service (IP / Port / Hazf / ...)"
+    echo "3) Didan-e Log (be soorat-e zende)"
+    echo "4) Cron Job Restart (har chand saat)"
     echo "0) Khorooj"
     echo "======================================"
-    read -rp "Entekhab kon [0-7]: " CHOICE
+    read -rp "Entekhab kon [0-4]: " CHOICE
 
     case "$CHOICE" in
-        1) do_install ;;
-        2) show_logs ;;
-        3) show_status ;;
-        4) do_restart ;;
-        5) do_reconfigure ;;
-        6) toggle_cron ;;
-        7) do_uninstall ;;
+        1) do_configure ;;
+        2) service_management_menu ;;
+        3) show_logs ;;
+        4) setup_cron_restart ;;
         0) exit 0 ;;
         *) log_err "Entekhab-e nadorost." ;;
     esac
@@ -328,16 +553,20 @@ show_menu() {
 # --- Ejra ---
 if [[ $# -gt 0 ]]; then
     case "$1" in
-        install) check_root; do_install ;;
+        configure|install) check_root; do_configure ;;
+        manage) service_management_menu ;;
+        changeip) change_ip ;;
+        changeports) change_ports ;;
         log|logs) show_logs ;;
+        cron) setup_cron_restart ;;
         status) show_status ;;
         restart) do_restart ;;
-        reconfigure) do_reconfigure ;;
-        cron) toggle_cron ;;
+        deleteservice) delete_service_and_cron ;;
+        togglecron) toggle_cron ;;
         uninstall) do_uninstall ;;
         *)
             log_err "Dastoor-e nashenakhte: $1"
-            echo "Estefade: bash gost-tunnel.sh [install|log|status|restart|reconfigure|cron|uninstall]"
+            echo "Estefade: bash gost-tunnel.sh [configure|manage|changeip|changeports|log|cron|status|restart|deleteservice|togglecron|uninstall]"
             exit 1
             ;;
     esac
